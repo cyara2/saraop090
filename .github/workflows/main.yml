@@ -1,31 +1,124 @@
-- name: Establish Automatic Tailscale Connection
+name: RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop and disable Network Level Authentication
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # Firewall Rule Configuration
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+
+          Restart-Service -Name TermService -Force
+
+      - name: Create Fixed RDP User
+        run: |
+          $user = Get-LocalUser -Name "runneradmin" -ErrorAction SilentlyContinue
+          if (-not $user) {
+              $secPass = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
+              New-LocalUser -Name "runneradmin" -Password $secPass -AccountNeverExpires
+          } else {
+              $secPass = ConvertTo-SecureString "P@ssw0rd!" -AsPlainText -Force
+              Set-LocalUser -Name "runneradmin" -Password $secPass
+              Enable-LocalUser -Name "runneradmin"
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+
+      - name: Download File, Extract & Install Automation Tools
         shell: pwsh
         run: |
-          $AuthKey = "${{ secrets.TAILSCALE_AUTH_KEY }}".Trim()
+          # 1. Google Drive se file download karein
+          Write-Host "Installing gdown..."
+          pip install gdown -q
+          Set-Location -Path "C:\Users\Public\Desktop"
+          Write-Host "Downloading file from Google Drive..."
+          gdown "https://drive.google.com/uc?id=1WgcAipfuH2bgC1tnsB7VtOTdf9qTq-1H"
           
-          if (-not $AuthKey) {
-              Write-Error "❌ TAILSCALE_AUTH_KEY is missing or empty in GitHub Secrets!"
-              exit 1
+          # 2. File extract (unzip) karein
+          $archives = Get-ChildItem -Path "C:\Users\Public\Desktop" | Where-Object { $_.Extension -match "\.(zip|rar)$" }
+          foreach ($archive in $archives) {
+              Write-Host "Extracting $($archive.Name)..."
+              7z x "$($archive.FullName)" -o"C:\Users\Public\Desktop" -y
+              Write-Host "Extracted successfully!"
           }
 
-          Write-Host "Connecting to Tailscale with key..."
-          
-          # Force connection using Tailscale CLI
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey="$AuthKey" --hostname="gh-runner-$env:GITHUB_RUN_ID" --ephemeral --accept-routes --force-relogin
+          # 3. Macro Recorder Silent Setup
+          Write-Host "Installing Macro Recorder..."
+          $macroSetup = Get-ChildItem -Path "C:\Users\Public\Desktop" -Filter "*Macro*Recorder*.exe" -Recurse | Select-Object -First 1
+          if ($macroSetup) {
+              Start-Process -FilePath $macroSetup.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/S", "/quiet" -NoNewWindow
+              Write-Host "Macro Recorder Installed!"
+          } else {
+              $exeFiles = Get-ChildItem -Path "C:\Users\Public\Desktop" -Filter "*.exe" -Recurse
+              foreach ($exe in $exeFiles) {
+                  Start-Process -FilePath $exe.FullName -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/S", "/quiet" -NoNewWindow
+              }
+          }
 
-          # Wait and check for IP
+          # 4. Chrome Extensions Setup
+          $chromePolicyPath = "HKLM:\Software\Policies\Google\Chrome\ExtensionInstallForcelist"
+          if (!(Test-Path $chromePolicyPath)) { New-Item -Path $chromePolicyPath -Force | Out-Null }
+          New-ItemProperty -Path $chromePolicyPath -Name "1" -Value "majdfhpaihoncoakbjgbdhglocklcgno;https://clients2.google.com/service/update2/crx" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path $chromePolicyPath -Name "2" -Value "lfkgcfakbpblpflbjanpoaipofoodnen;https://clients2.google.com/service/update2/crx" -PropertyType String -Force | Out-Null
+
+          # 5. Edge Extensions Setup
+          $edgePolicyPath = "HKLM:\Software\Policies\Microsoft\Edge\ExtensionInstallForcelist"
+          if (!(Test-Path $edgePolicyPath)) { New-Item -Path $edgePolicyPath -Force | Out-Null }
+          New-ItemProperty -Path $edgePolicyPath -Name "1" -Value "majdfhpaihoncoakbjgbdhglocklcgno;https://clients2.google.com/service/update2/crx" -PropertyType String -Force | Out-Null
+          New-ItemProperty -Path $edgePolicyPath -Name "2" -Value "lfkgcfakbpblpflbjanpoaipofoodnen;https://clients2.google.com/service/update2/crx" -PropertyType String -Force | Out-Null
+
+      - name: Install Tailscale
+        run: |
+          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
+          
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+
+      - name: Establish Tailscale Connection
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --ephemeral --accept-routes
+          
           $tsIP = $null
           $retries = 0
-          while (-not $tsIP -and $retries -lt 15) {
-              Start-Sleep -Seconds 4
+          while (-not $tsIP -and $retries -lt 12) {
               $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+              Start-Sleep -Seconds 5
               $retries++
           }
           
           if (-not $tsIP) {
-              Write-Error "❌ Tailscale IP assignment failed. Check key permissions."
+              Write-Error "Tailscale IP assignment failed."
               exit 1
           }
-          
-          Write-Host "✅ Connected successfully! IP: $tsIP"
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Display RDP Login Credentials
+        run: |
+          Write-Host "`n=========================================="
+          Write-Host "🚀 RDP ACCESS DETAILS"
+          Write-Host "=========================================="
+          Write-Host "Address  : $env:TAILSCALE_IP"
+          Write-Host "Username : runneradmin"
+          Write-Host "Password : P@ssw0rd!"
+          Write-Host "==========================================`n"
+
+      - name: Maintain Connection
+        run: |
+          for ($i = 0; $i -lt 72; $i++) {
+              Write-Host "[$(Get-Date)] RDP Active - Waiting 5 minutes..."
+              Start-Sleep -Seconds 300
+          }
