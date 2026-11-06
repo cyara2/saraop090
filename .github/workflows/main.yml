@@ -1,4 +1,4 @@
-name: RDP-Cloudflare
+name: RDP-Cloudflare-Auto
 
 on:
   workflow_dispatch:
@@ -7,15 +7,29 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
-      - name: Enable RDP
+      - name: Set Credentials & Enable RDP
         run: |
+          # یوزر نیم اور پاسورڈ سیٹ کریں
+          $username = "runneradmin"
+          $password = "Cloudflare123!"
+          
+          net user $username $password
+          
+          # ونڈوز RDP ان ایبل کریں
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+          
+          Write-Host "==================================================" -ForegroundColor Green
+          Write-Host " RDP Username: $username" -ForegroundColor Cyan
+          Write-Host " RDP Password: $password" -ForegroundColor Cyan
+          Write-Host "==================================================" -ForegroundColor Green
 
-      - name: Download Cloudflare
+      - name: Download Cloudflare Tunnel
         run: |
           Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
 
-      - name: Run Tunnel (Foreground)
-        run: .\cloudflared.exe tunnel --url rdp://localhost:3389
+      - name: Start Cloudflare Tunnel & Show Connection Link
+        run: |
+          # کلاؤڈ فلارے ٹنल کو RDP پورٹ (3389) پر چلانا
+          .\cloudflared.exe tunnel --url rdp://localhost:3389
